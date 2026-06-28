@@ -2226,30 +2226,31 @@ class TelegramAdapter(BasePlatformAdapter):
                     BotCommandScopeDefault,
                 )
                 from hermes_cli.commands import telegram_menu_commands
-                # Telegram allows up to 100 commands but has an undocumented
-                # payload size limit (~4KB total).  Limit to 30 core commands
-                # to stay well under the threshold while covering all categories.
-                menu_commands, hidden_count = telegram_menu_commands(max_commands=MAX_COMMANDS_PER_SCOPE)
-                bot_commands = [BotCommand(name, desc) for name, desc in menu_commands]
-                # Register for all scopes independently — Telegram picks the
-                # narrowest matching scope per chat type (forum topics fall
-                # through to AllGroupChats or Default).
-                for scope_cls in (BotCommandScopeDefault, BotCommandScopeAllPrivateChats, BotCommandScopeAllGroupChats):
-                    scope_name = scope_cls.__name__
-                    try:
-                        await self._bot.set_my_commands(bot_commands, scope=scope_cls())
-                        logger.info("[%s] set_my_commands OK for scope %s (%d cmds)", self.name, scope_name, len(bot_commands))
-                    except Exception as scope_err:
-                        logger.warning("[%s] set_my_commands FAILED for scope %s: %s", self.name, scope_name, scope_err)
-                # Forum topics don't inherit AllGroupChats — Telegram resolves
-                # commands via BotCommandScopeChat(chat_id) for forum groups.
-                # Lazy registration happens in _ensure_forum_commands on first
-                # message from a forum topic (see _handle_text_message).
-                if hidden_count:
-                    logger.info(
-                        "[%s] Telegram menu: %d commands registered, %d hidden (over %d limit). Use /commands for full list.",
-                        self.name, len(menu_commands), hidden_count, 30,
-                    )
+                # Respect GATEWAY_SKIP_SET_COMMANDS — public/demo bots should
+                # not expose admin commands like /restart_gateway.
+                if os.getenv("GATEWAY_SKIP_SET_COMMANDS", "").lower() in ("1", "true", "yes"):
+                    logger.info("[%s] Skipping set_my_commands (GATEWAY_SKIP_SET_COMMANDS=true)", self.name)
+                else:
+                    # Telegram allows up to 100 commands but has an undocumented
+                    # payload size limit (~4KB total).  Limit to 30 core commands
+                    # to stay well under the threshold while covering all categories.
+                    menu_commands, hidden_count = telegram_menu_commands(max_commands=MAX_COMMANDS_PER_SCOPE)
+                    bot_commands = [BotCommand(name, desc) for name, desc in menu_commands]
+                    # Register for all scopes independently — Telegram picks the
+                    # narrowest matching scope per chat type (forum topics fall
+                    # through to AllGroupChats or Default).
+                    for scope_cls in (BotCommandScopeDefault, BotCommandScopeAllPrivateChats, BotCommandScopeAllGroupChats):
+                        scope_name = scope_cls.__name__
+                        try:
+                            await self._bot.set_my_commands(bot_commands, scope=scope_cls())
+                            logger.info("[%s] set_my_commands OK for scope %s (%d cmds)", self.name, scope_name, len(bot_commands))
+                        except Exception as scope_err:
+                            logger.warning("[%s] set_my_commands FAILED for scope %s: %s", self.name, scope_name, scope_err)
+                    if hidden_count:
+                        logger.info(
+                            "[%s] Telegram menu: %d commands registered, %d hidden (over %d limit). Use /commands for full list.",
+                            self.name, len(menu_commands), hidden_count, MAX_COMMANDS_PER_SCOPE,
+                        )
             except Exception as e:
                 logger.warning(
                     "[%s] Could not register Telegram command menu: %s",

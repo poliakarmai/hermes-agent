@@ -35,6 +35,7 @@ import importlib.util
 import json
 import logging
 import os
+import shlex
 import platform
 import re
 import time
@@ -1897,6 +1898,14 @@ def terminal_tool(
         # Get configuration
         config = _get_env_config()
         env_type = config["env_type"]
+
+        # Multi-tenant isolation (C7): wrap command with sudo -u <tenant>
+        # when HERMES_TENANT_USER is set and backend is local.
+        _tenant_user = os.environ.get("HERMES_TENANT_USER")
+        if _tenant_user and env_type == "local":
+            # Use sh -c to preserve shell semantics (pipes, redirects, etc.)
+            _escaped = command.replace("\\", "\\\\").replace("'", "'\\''")
+            command = f"sudo -u {shlex.quote(_tenant_user)} -H -- sh -c '{_escaped}'"
 
         # Use task_id for environment isolation. By default all subagent
         # task_ids collapse back to "default" so the top-level agent and

@@ -14265,6 +14265,58 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         agent_cfg_local = user_config.get("agent") or {}
         disabled_toolsets = agent_cfg_local.get("disabled_toolsets") or None
 
+        # Multi-tenant: profile-specific disabled_toolsets
+        # SECURITY: if profile exists but fails to load, fail CLOSED —
+        # apply a restrictive default so tenant never gets admin access.
+        _profile_restrictive_default = ["terminal", "file", "cronjob", "delegation"]
+        try:
+            tg_cfg = user_config.get("telegram", {})
+            channel_profiles = tg_cfg.get("channel_profiles", {})
+            chat_id = getattr(getattr(source, "source", None), "chat_id", None)
+            if chat_id and str(chat_id) in channel_profiles:
+                profile_name = channel_profiles[str(chat_id)]
+                profile_config_path = _hermes_home / "profiles" / profile_name / "config.yaml"
+                if profile_config_path.exists():
+                    import yaml
+                    with open(profile_config_path) as pf:
+                        profile_cfg = yaml.safe_load(pf) or {}
+                    profile_disabled = (profile_cfg.get("agent") or {}).get("disabled_toolsets") or []
+                    if profile_disabled:
+                        base = list(disabled_toolsets) if disabled_toolsets else []
+                        disabled_toolsets = list(set(base + profile_disabled))
+                    # C7 fix: set tenant user for terminal isolation
+                    _tenant_name = (profile_cfg.get("profile") or {}).get("tenant_name")
+                    if _tenant_name:
+                        os.environ["HERMES_TENANT_USER"] = f"hermes-{_tenant_name}"
+                        _sandbox = (profile_cfg.get("profile") or {}).get("sandbox")
+                        if _sandbox:
+                            os.environ["HERMES_TENANT_SANDBOX"] = _sandbox
+        except Exception as exc:
+            logging.getLogger(__name__).warning(
+                "Profile %s config failed to load (%s). "
+                "Applying restrictive defaults: %s",
+                profile_name, exc, _profile_restrictive_default,
+            )
+            disabled_toolsets = list(
+                set((disabled_toolsets or []) + _profile_restrictive_default)
+            )
+
+        # Multi-tenant: profile-specific MCP servers
+        # Tenants get only their own MCP servers (e.g. tavily), not admin's (bybit-ws)
+        try:
+            if chat_id and str(chat_id) in channel_profiles:
+                profile_name = channel_profiles[str(chat_id)]
+                profile_config_path = _hermes_home / "profiles" / profile_name / "config.yaml"
+                if profile_config_path.exists():
+                    import yaml
+                    with open(profile_config_path) as pf:
+                        profile_cfg = yaml.safe_load(pf) or {}
+                    profile_mcp = profile_cfg.get("mcp_servers")
+                    if profile_mcp is not None:
+                        user_config["mcp_servers"] = profile_mcp
+        except Exception:
+            pass  # fall through to global mcp_servers
+
         display_config = user_config.get("display", {})
         if not isinstance(display_config, dict):
             display_config = {}
@@ -15054,6 +15106,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 _fut.add_done_callback(_track_status_id)
 
         def run_sync():
+            import logging
             # The conditional re-assignment of `message` further below
             # (prepending model-switch notes) makes Python treat it as a
             # local variable in the entire function.  `nonlocal` lets us
@@ -15087,7 +15140,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     session_key=session_key,
                     user_config=user_config,
                 )
-                logger.debug(
+                logging.getLogger(__name__).debug(
                     "run_agent resolved: model=%s provider=%s session=%s",
                     model, runtime_kwargs.get("provider"), session_key or "",
                 )
@@ -15186,7 +15239,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                                     _stream_consumer.on_delta(text)
                         stream_consumer_holder[0] = _stream_consumer
                 except Exception as _sc_err:
-                    logger.debug("Could not set up stream consumer: %s", _sc_err)
+                    logging.getLogger(__name__).debug("Could not set up stream consumer: %s", _sc_err)
 
             def _interim_assistant_cb(text: str, *, already_streamed: bool = False) -> None:
                 if not _run_still_current():
