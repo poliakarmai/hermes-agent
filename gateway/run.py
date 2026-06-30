@@ -15397,6 +15397,42 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         agent_cfg_local = user_config.get("agent") or {}
         disabled_toolsets = agent_cfg_local.get("disabled_toolsets") or None
 
+        # Multi-tenant: profile-specific disabled_toolsets
+        # SECURITY: if profile exists but fails to load, fail CLOSED —
+        # apply a restrictive default so tenant never gets admin access.
+        _profile_restrictive_default = ["terminal", "file", "cronjob", "delegation"]
+        try:
+            tg_cfg = user_config.get("telegram", {})
+            channel_profiles = tg_cfg.get("channel_profiles", {})
+            chat_id = getattr(getattr(source, "source", None), "chat_id", None)
+            if chat_id and str(chat_id) in channel_profiles:
+                profile_name = channel_profiles[str(chat_id)]
+                profile_config_path = _hermes_home / "profiles" / profile_name / "config.yaml"
+                if profile_config_path.exists():
+                    import yaml
+                    with open(profile_config_path) as pf:
+                        profile_cfg = yaml.safe_load(pf) or {}
+                    profile_disabled = (profile_cfg.get("agent") or {}).get("disabled_toolsets") or []
+                    if profile_disabled:
+                        base = list(disabled_toolsets) if disabled_toolsets else []
+                        disabled_toolsets = list(set(base + profile_disabled))
+                    # C7 fix: set tenant user for terminal isolation
+                    _tenant_name = (profile_cfg.get("profile") or {}).get("tenant_name")
+                    if _tenant_name:
+                        os.environ["HERMES_TENANT_USER"] = f"hermes-{_tenant_name}"
+                        _sandbox = (profile_cfg.get("profile") or {}).get("sandbox")
+                        if _sandbox:
+                            os.environ["HERMES_TENANT_SANDBOX"] = _sandbox
+        except Exception as exc:
+            logging.getLogger(__name__).warning(
+                "Profile %s config failed to load (%s). "
+                "Applying restrictive defaults: %s",
+                profile_name, exc, _profile_restrictive_default,
+            )
+            disabled_toolsets = list(
+                set((disabled_toolsets or []) + _profile_restrictive_default)
+            )
+
         display_config = user_config.get("display", {})
         if not isinstance(display_config, dict):
             display_config = {}
